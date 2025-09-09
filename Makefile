@@ -69,6 +69,16 @@ macbuild:
 repairbuild:
 	mkdir -p bin/ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64  go build -ldflags "-s -w -X main.Version=$(VERSION)" -o ./bin/repair dingospeed/repair
 
+.PHONY: mockbuild
+# build mock service
+mockbuild:
+	mkdir -p bin/ && go build -o ./bin/mock dingospeed/cmd/mock
+
+.PHONY: mockrun
+# run mock service
+mockrun:
+	go run dingospeed/cmd/mock
+
 .PHONY: repairScpDev
 repairScpDev:
 	scp bin/repair root@172.30.14.123:/root/hub-download/dingospeed
