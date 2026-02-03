@@ -35,7 +35,6 @@ type TaskParam struct {
 	Uri           string
 	DataType      string
 	Etag          string
-	Preheat       bool
 	Cancel        context.CancelFunc
 }
 
@@ -52,8 +51,16 @@ type DownloadTask struct {
 	Preheat       bool
 }
 
-func (c *DownloadTask) SetTaskSize(taskSize int) {
-	c.TaskSize = taskSize
+func (d *DownloadTask) GetTaskNo() int {
+	return d.TaskNo
+}
+
+func (d *DownloadTask) SetTaskSize(taskSize int) {
+	d.TaskSize = taskSize
+}
+
+func (d *DownloadTask) GetCancelFun() context.CancelFunc {
+	return nil
 }
 
 type CacheFileTask struct {
@@ -69,20 +76,17 @@ func NewCacheFileTask(taskNo int, rangeStartPos int64, rangeEndPos int64) *Cache
 	return c
 }
 
-func (c CacheFileTask) DoTask() {
+func (c *CacheFileTask) DoTask() {
 	zap.S().Infof("cache dotask:%s/%s, taskNo:%d, size:%d, startPos:%d, endPos:%d", c.OrgRepo, c.FileName, c.TaskNo, c.TaskSize, c.RangeStartPos, c.RangeEndPos)
 }
 
-func (c CacheFileTask) OutResult() {
-	if c.Preheat {
-		return
-	}
+func (c *CacheFileTask) OutResult() {
 	startBlock := c.RangeStartPos / c.DingFile.GetBlockSize()
 	endBlock := (c.RangeEndPos - 1) / c.DingFile.GetBlockSize()
 	curPos := c.RangeStartPos
 	for curBlock := startBlock; curBlock <= endBlock; curBlock++ {
 		if c.Context.Err() != nil {
-			zap.S().Warnf("for cache ctx err :%s", c.FileName)
+			zap.S().Errorf("for cache ctx err :%s, %v", c.FileName, c.Context.Err())
 			return
 		}
 		_, blockStartPos, blockEndPos := GetBlockInfo(curPos, c.DingFile.GetBlockSize(), c.DingFile.GetFileSize())
@@ -125,6 +129,6 @@ func (c CacheFileTask) OutResult() {
 	zap.S().Infof("cache out:%s/%s, taskNo:%d, size:%d, startPos:%d, endPos:%d", c.OrgRepo, c.FileName, c.TaskNo, c.TaskSize, c.RangeStartPos, c.RangeEndPos)
 }
 
-func (c CacheFileTask) GetResponseChan() chan []byte {
+func (c *CacheFileTask) GetResponseChan() chan []byte {
 	return c.ResponseChan
 }

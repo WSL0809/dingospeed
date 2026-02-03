@@ -52,7 +52,6 @@ func (s *SchedulerService) Heartbeat() {
 			}
 			runModeChange(consts.SchedulerModeCluster)
 		case <-s.Ctx.Done():
-			zap.S().Warnf("Heartbeat stop.")
 			return
 		}
 	}
@@ -61,18 +60,21 @@ func (s *SchedulerService) Heartbeat() {
 func (s *SchedulerService) ReportFileProcess() {
 	for {
 		select {
-		case file, ok := <-data.GetFileProcessChan():
+		case processParam, ok := <-data.GetFileProcessChan():
 			if !ok {
 				return
 			}
-			s.schedulerDao.ReportFileProcess(&manager.FileProcessRequest{
-				ProcessId: file.ProcessId,
-				StaPos:    file.StartPos,
-				EndPos:    file.EndPos,
-				Status:    file.Status,
+			err := s.schedulerDao.ReportFileProcess(&manager.FileProcessRequest{
+				ProcessId: processParam.ProcessId,
+				StaPos:    processParam.StartPos,
+				EndPos:    processParam.EndPos,
+				Status:    processParam.Status,
 			})
+			if err != nil {
+				zap.S().Errorf("ReportFileProcess err.%v", err)
+				data.WriteLocalOperationChan(consts.OperationProcess, processParam) // write local
+			}
 		case <-s.Ctx.Done():
-			zap.S().Warnf("ReportFileProcess stop.")
 			return
 		}
 	}
@@ -90,5 +92,4 @@ func runModeChange(mode string) {
 			config.SysConfig.SetSchedulerModel(consts.SchedulerModeCluster)
 		}
 	}
-
 }

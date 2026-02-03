@@ -16,15 +16,17 @@ import (
 )
 
 type SchedulerServer struct {
-	conn             *grpc.ClientConn
-	schedulerService *service.SchedulerService
-	sysService       *service.SysService
+	conn                  *grpc.ClientConn
+	schedulerService      *service.SchedulerService
+	localOperationService *service.LocalOperationService
+	sysService            *service.SysService
 }
 
-func NewSchedulerServer(schedulerService *service.SchedulerService, sysService *service.SysService) *SchedulerServer {
+func NewSchedulerServer(schedulerService *service.SchedulerService, sysService *service.SysService, localOperationService *service.LocalOperationService) *SchedulerServer {
 	return &SchedulerServer{
-		schedulerService: schedulerService,
-		sysService:       sysService,
+		schedulerService:      schedulerService,
+		sysService:            sysService,
+		localOperationService: localOperationService,
 	}
 }
 
@@ -45,6 +47,9 @@ func (s *SchedulerServer) Start(ctx context.Context) error {
 	s.sysService.Client = client
 	s.schedulerService.Ctx = ctx
 	s.schedulerService.Register()
+
+	s.localOperationService.Ctx = ctx
+	s.localOperationService.Initialize()
 	return nil
 }
 

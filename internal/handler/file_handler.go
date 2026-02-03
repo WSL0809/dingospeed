@@ -16,11 +16,9 @@ package handler
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 
-	"dingospeed/internal/model"
 	"dingospeed/internal/service"
 	"dingospeed/pkg/config"
 	"dingospeed/pkg/consts"
@@ -33,14 +31,16 @@ import (
 )
 
 type FileHandler struct {
-	fileService *service.FileService
-	sysService  *service.SysService
+	fileService           *service.FileService
+	sysService            *service.SysService
+	localOperationService *service.LocalOperationService
 }
 
-func NewFileHandler(fileService *service.FileService, sysService *service.SysService) *FileHandler {
+func NewFileHandler(fileService *service.FileService, sysService *service.SysService, localOperationService *service.LocalOperationService) *FileHandler {
 	return &FileHandler{
-		fileService: fileService,
-		sysService:  sysService,
+		fileService:           fileService,
+		sysService:            sysService,
+		localOperationService: localOperationService,
 	}
 }
 
@@ -175,29 +175,20 @@ func (handler *FileHandler) fileGetCommon(c echo.Context, repoType, orgRepo, com
 	}
 }
 
-func (handler *FileHandler) GetPathInfoHandler(c echo.Context) error {
-	query := new(model.PathInfoQuery)
-	if err := c.Bind(query); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "无效的 JSON 数据",
-		})
-	}
-	info, err := handler.fileService.GetPathInfo(query)
-	if err != nil {
-		return util.ErrorProxyError(c)
-	}
-	return util.ResponseData(c, info)
-}
-
 func (handler *FileHandler) GetFileOffset(c echo.Context) error {
 	dataType := c.Param("dataType")
 	org := c.Param("org")
 	repo := c.Param("repo")
 	etag := c.Param("etag")
 	fileSizeStr := c.Param("fileSize")
-
 	fileSize, _ := strconv.ParseInt(fileSizeStr, 10, 64)
-
-	offset := handler.fileService.GetFileOffset(c, dataType, org, repo, etag, fileSize)
+	offset := handler.fileService.GetFileOffset(dataType, org, repo, etag, fileSize)
 	return util.ResponseData(c, offset)
+}
+
+func (handler *FileHandler) FileProcessSync(c echo.Context) error {
+	if err := handler.localOperationService.FileProcessSync(); err != nil {
+		return util.ResponseError(c, err)
+	}
+	return util.ResponseData(c, nil)
 }

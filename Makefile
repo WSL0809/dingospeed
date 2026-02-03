@@ -1,6 +1,6 @@
 GOHOSTOS:=$(shell go env GOHOSTOS)
 GOPATH:=$(shell go env GOPATH)
-VERSION=$(shell git describe --tags --always)
+VERSION=$(shell git describe --tags --always --dirty)
 PACKAGES=$(shell go list ./... | grep -v /vendor/)
 CURRENTTIME=$(shell date +"%Y%m%d%H%M%S")
 
@@ -100,8 +100,8 @@ license:
 .PHONY: docker
 docker:
 	make macbuild;
-	docker build -f docker/Dockerfile-simple -t harbor.dev01.zetyun.cn/dingofs/dingospeed:$(CURRENTTIME) .
-	docker push harbor.dev01.zetyun.cn/dingofs/dingospeed:$(CURRENTTIME)
+	docker buildx build --platform linux/amd64 -f docker/Dockerfile-alpine-simple -t harbor.zetyun.cn/dingofs/dingospeed:$(CURRENTTIME) .
+	docker push harbor.zetyun.cn/dingofs/dingospeed:$(CURRENTTIME)
 
 .PHONY: all
 # generate all

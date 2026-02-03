@@ -15,8 +15,11 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+
+	myerr "dingospeed/pkg/error"
 
 	"github.com/labstack/echo/v4"
 )
@@ -34,7 +37,7 @@ func ErrorRepoNotFound(ctx echo.Context) error {
 
 func ErrorRequestParam(ctx echo.Context) error {
 	content := map[string]string{
-		"error": "Request param error",
+		"error": "请求参数错误",
 	}
 	headers := map[string]string{
 		"x-error-code":    "Request param error",
@@ -65,6 +68,9 @@ func ErrorEntryNotFoundBranch(ctx echo.Context, branch, path string) error {
 func ErrorEntryUnknown(ctx echo.Context, statusCode int, msg string) error {
 	content := map[string]string{
 		"error": msg,
+	}
+	if statusCode == 0 {
+		statusCode = http.StatusInternalServerError
 	}
 	return Response(ctx, statusCode, nil, content)
 }
@@ -122,9 +128,9 @@ func ErrorTooManyRequest(ctx echo.Context) error {
 	return Response(ctx, http.StatusTooManyRequests, nil, content)
 }
 
-func ResponseHeaders(ctx echo.Context, headers map[string]string) error {
+func ResponseHeaders(ctx echo.Context, code int, headers map[string]string) error {
 	fullHeaders(ctx, headers)
-	return ctx.JSON(http.StatusOK, nil)
+	return ctx.JSON(code, nil)
 }
 
 func Response(ctx echo.Context, httpStatus int, headers map[string]string, data interface{}) error {
@@ -136,8 +142,44 @@ func ResponseData(ctx echo.Context, data interface{}) error {
 	return ctx.JSON(http.StatusOK, data)
 }
 
+func NormalResponseData(ctx echo.Context, data interface{}) error {
+	return ctx.JSON(http.StatusOK, Body{
+		Data: data,
+		Msg:  "success",
+	})
+}
+
+func ResponseError(ctx echo.Context, cause ...error) error {
+	msg := "操作失败"
+	code := http.StatusInternalServerError
+	if len(cause) > 0 {
+		c := cause[0]
+		var t myerr.Error
+		if errors.As(c, &t) {
+			if t.StatusCode() > 0 {
+				code = t.StatusCode()
+			}
+			msg = t.Error()
+		}
+	}
+	content := map[string]string{
+		"error": msg,
+	}
+	return ctx.JSON(code, content)
+}
+
 func fullHeaders(c echo.Context, headers map[string]string) {
 	for k, v := range headers {
 		c.Response().Header().Set(k, v)
 	}
+}
+
+type Body struct {
+	Msg  string      `json:"msg"`
+	Data interface{} `json:"data"`
+}
+
+type PageData struct {
+	Total int64       `json:"total"`
+	List  interface{} `json:"list"`
 }

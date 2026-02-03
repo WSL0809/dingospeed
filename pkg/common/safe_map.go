@@ -40,17 +40,27 @@ func (sm *SafeMap[K, V]) Get(key K) (V, bool) {
 	return value, exists
 }
 
+func (sm *SafeMap[K, V]) Exist(key K) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	_, exists := sm.m[key]
+	return exists
+}
+
 func (sm *SafeMap[K, V]) Delete(key K) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	delete(sm.m, key)
 }
 
+func (sm *SafeMap[K, V]) DeleteAll() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.m = make(map[K]V)
+}
+
 func (sm *SafeMap[K, V]) Len() int {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return len(sm.m)
-}
-
-func (f *SafeMap[K, V]) Wait() {
 }

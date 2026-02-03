@@ -35,7 +35,17 @@ func (a RepoType) Value() string {
 	return string(a)
 }
 
-const HUGGINGFACE_HEADER_X_REPO_COMMIT = "X-Repo-Commit"
+const (
+	HUGGINGFACE_HEADER_CONTENT_LENGTH = "content-length"
+	HUGGINGFACE_HEADER_ETAG           = "etag"
+	HUGGINGFACE_HEADER_X_REPO_COMMIT  = "X-Repo-Commit"
+	HUGGINGFACE_HEADER_X_LINKED_ETAG  = "X-Linked-Etag"
+	HUGGINGFACE_HEADER_X_LINKED_SIZE  = "X-Linked-Size"
+	HUGGINGFACE_HEADER_X_XET_HASH     = "X-Xet-Hash"
+	HUGGINGFACE_LOCATION              = "Location"
+	HUGGINGFACE_Link                  = "Link"
+)
+const MAX_HTTP_DOWNLOAD_SIZE = 50 * 1000 * 1000 * 1000 // 50 GB
 
 const (
 	RequestTypeHead = "head"
@@ -53,7 +63,7 @@ const (
 	SchedulerModeCluster    = "cluster"
 )
 
-var RpcRequestTimeout = time.Duration(3) * time.Second
+var RpcRequestTimeout = time.Duration(300) * time.Second
 
 const (
 	Huggingface        = "huggingface"
@@ -67,13 +77,30 @@ const (
 )
 
 const (
+	CacheTypePreheat = 1
+	CacheTypeMount   = 2
+
+	RunningStatusJobIng      = 1
+	RunningStatusJobBreak    = 2
+	RunningStatusJobComplete = 3
+	RunningStatusJobStopping = 4
+	RunningStatusJobStop     = 5
+	RunningStatusJobWait     = 6
+
+	OperationProcess int = 1
+	OperationPreheat int = 2
+	OperationMount   int = 3
+)
+
+const (
 	StatusDownloading   = 1
 	StatusDownloadBreak = 2
 	StatusDownloaded    = 3
 
 	KeyProcessId        = "processId"
 	KeyMasterInstanceId = "masterInstanceId"
+)
 
-	TaskTypeCache  = "cache"
-	TaskTypeRemote = "remote"
+const (
+	TaskMoreErrMsg = "当前缓存任务较多导致启动失败，请稍后再启动。"
 )

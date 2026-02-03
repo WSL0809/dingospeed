@@ -85,23 +85,20 @@ func (d *DownloaderDao) FileDownload(startPos, endPos int64, isInnerRequest bool
 	wg.Wait() // 等待协程池所有远程下载任务执行完毕
 }
 
-func (d *DownloaderDao) constructTask(startPos, endPos int64, isInnerRequest bool, taskParam *downloader.TaskParam) []common.Task {
+func (d *DownloaderDao) constructTask(startPos, endPos int64, isInnerRequest bool, taskParam *downloader.TaskParam) []common.DownloadTask {
 	var (
-		tasks         []common.Task
+		tasks         []common.DownloadTask
 		ctx           = taskParam.Context
 		existPosition bool
 		curPos        int64
 	)
-	if taskParam.FileSize <= config.SysConfig.Scheduler.MinimumFileSize {
+	// 小于这个值的文件将不参与调度
+	if taskParam.FileSize <= config.SysConfig.GetMinimumFileSize() {
 		goto localTask
 	}
+	// 分析下载类型是否全部存在，若文件不完整，返回当前已缓存的最大偏移量
 	existPosition, curPos = analysisFilePosition(taskParam.DingFile, startPos, endPos)
-	// if config.SysConfig.IsCluster() && existPosition {
-	// 	// 同步check本地仓库和数据库的偏移量，若数据库滞后，则需更新该数据。
-	// 	if err := d.SyncFileProcess(taskParam.DataType, taskParam.OrgRepo, taskParam.FileName, taskParam.Etag, curPos, endPos, taskParam.FileSize); err != nil {
-	// 		zap.S().Errorf("SyncFileProcess err.%v", err)
-	// 	}
-	// }
+	// isInnerRequest为true，即内部请求，是已经被调度过后，设置为内部域名的请求，这种请求将不会再次参与调度，直接做下载即可。
 	if !isInnerRequest && config.SysConfig.IsCluster() && !existPosition {
 		if response, err := d.getRequestDomainScheduler(taskParam.DataType, taskParam.OrgRepo, taskParam.FileName, taskParam.Etag, curPos, endPos, taskParam.FileSize); err != nil {
 			zap.S().Errorf("getRequestDomainScheduler err.%v", err)
@@ -111,7 +108,7 @@ func (d *DownloaderDao) constructTask(startPos, endPos int64, isInnerRequest boo
 			ctx = context.WithValue(ctx, consts.KeyMasterInstanceId, response.MasterInstanceId)
 			taskParam.Context = ctx
 			if response.SchedulerType == consts.SchedulerYes {
-				if curPos != 0 {
+				if curPos > 0 && startPos < curPos {
 					tasks = getContiguousRanges(startPos, curPos, taskParam)
 				}
 				speedDomain := fmt.Sprintf("http://%s:%d", response.Host, response.Port) // 此刻向该节点发起远程下载请求
@@ -123,9 +120,9 @@ func (d *DownloaderDao) constructTask(startPos, endPos int64, isInnerRequest boo
 					// 需要重新拆分任务
 					taskParam.Domain = speedDomain
 					beforeTasks := getContiguousRanges(curPos, response.MaxOffset, taskParam)
+					tasks = append(tasks, beforeTasks...)
 					taskParam.Domain = config.SysConfig.GetHFURLBase()
 					afterTasks := getContiguousRanges(response.MaxOffset, endPos, taskParam)
-					tasks = append(tasks, beforeTasks...)
 					tasks = append(tasks, afterTasks...)
 				}
 				return tasks
@@ -141,26 +138,6 @@ localTask:
 	taskParam.Domain = config.SysConfig.GetHFURLBase()
 	tasks = getContiguousRanges(startPos, endPos, taskParam)
 	return tasks
-}
-
-func (d *DownloaderDao) SyncFileProcess(dataType, orgRepo, fileName, etag string, startPos, endPos, fileSize int64) error {
-	org, repo := util.SplitOrgRepo(orgRepo)
-	err := d.schedulerDao.SyncFileProcess(&manager.SchedulerFileRequest{
-		DataType:   dataType,
-		Org:        org,
-		Repo:       repo,
-		Name:       fileName,
-		Etag:       etag,
-		InstanceId: config.SysConfig.Scheduler.Discovery.InstanceId,
-		StartPos:   startPos,
-		EndPos:     endPos,
-		FileSize:   fileSize,
-	})
-	if err != nil {
-		zap.S().Errorf("SyncFileProcess err.%v", err)
-		return err
-	}
-	return nil
 }
 
 func (d *DownloaderDao) getRequestDomainScheduler(dataType, orgRepo, fileName, etag string, startPos, endPos, fileSize int64) (*manager.SchedulerFileResponse, error) {
@@ -188,15 +165,15 @@ func getQueueSize(rangeStartPos, rangeEndPos int64) int64 {
 	return bufSize/config.SysConfig.Download.RespChunkSize + 1
 }
 
-func doTask(ctx context.Context, tasks []common.Task) {
+func doTask(ctx context.Context, tasks []common.DownloadTask) {
 	var pool *common.Pool
 	taskLen := len(tasks)
 	if taskLen == 0 {
 		return
 	} else if taskLen >= config.SysConfig.Download.GoroutineMaxNumPerFile {
-		pool = common.NewPool(config.SysConfig.Download.GoroutineMaxNumPerFile)
+		pool = common.NewPool(config.SysConfig.Download.GoroutineMaxNumPerFile, false)
 	} else {
-		pool = common.NewPool(taskLen)
+		pool = common.NewPool(taskLen, false)
 	}
 	defer pool.Close()
 	for i := 0; i < taskLen; i++ {
@@ -217,10 +194,10 @@ func doTask(ctx context.Context, tasks []common.Task) {
 
 func analysisFilePosition(dingFile *downloader.DingCache, startPos, endPos int64) (bool, int64) {
 	if startPos == 0 && endPos == 0 {
-		return true, endPos
+		return true, startPos
 	}
 	if startPos < 0 || endPos <= startPos || endPos > dingFile.GetFileSize() {
-		zap.S().Errorf("Invalid startPos or endPos: startPos=%d, endPos=%d", startPos, endPos)
+		zap.S().Errorf("Invalid startPos/endPos: path=%s, startPos=%d, endPos=%d", dingFile.GetPath(), startPos, endPos)
 		return false, startPos
 	}
 	startBlock := startPos / dingFile.GetBlockSize()
@@ -229,11 +206,12 @@ func analysisFilePosition(dingFile *downloader.DingCache, startPos, endPos int64
 		blockExists, err := dingFile.HasBlock(curBlock)
 		if err != nil {
 			zap.S().Errorf("Failed to check block existence: %v", err)
-			curPos := curBlock * dingFile.GetBlockSize()
-			return false, curPos
 		}
 		if !blockExists {
 			curPos := curBlock * dingFile.GetBlockSize()
+			if curPos < startPos { // 若startPos就不存在，将直接返回该位置。
+				curPos = startPos
+			}
 			return false, curPos
 		}
 	}
@@ -242,14 +220,14 @@ func analysisFilePosition(dingFile *downloader.DingCache, startPos, endPos int64
 
 // 将文件的偏移量分为cache和remote，对针对remote按照指定的RangeSize做切分
 
-func getContiguousRanges(startPos, endPos int64, taskParam *downloader.TaskParam) (tasks []common.Task) {
+func getContiguousRanges(startPos, endPos int64, taskParam *downloader.TaskParam) (tasks []common.DownloadTask) {
 	ctx := taskParam.Context
 	dingFile := taskParam.DingFile
 	if startPos == 0 && endPos == 0 {
 		return
 	}
 	if startPos < 0 || endPos <= startPos || endPos > dingFile.GetFileSize() {
-		zap.S().Errorf("Invalid startPos or endPos: startPos=%d, endPos=%d", startPos, endPos)
+		zap.S().Errorf("Invalid pos path=%s, startPos=%d, endPos=%d", dingFile.GetPath(), startPos, endPos)
 		return
 	}
 	startBlock := startPos / dingFile.GetBlockSize()
@@ -302,9 +280,9 @@ func getContiguousRanges(startPos, endPos int64, taskParam *downloader.TaskParam
 	return
 }
 
-func splitRemoteRange(startPos, endPos int64, taskNo *int, taskParam *downloader.TaskParam) []common.Task {
+func splitRemoteRange(startPos, endPos int64, taskNo *int, taskParam *downloader.TaskParam) []common.DownloadTask {
 	rangeSize := config.SysConfig.Download.RemoteFileRangeSize
-	remoteTasks := make([]common.Task, 0)
+	remoteTasks := make([]common.DownloadTask, 0)
 	if rangeSize == 0 {
 		c := createRemoteTask(*taskNo, startPos, endPos, taskParam)
 		remoteTasks = append(remoteTasks, c)
@@ -332,7 +310,6 @@ func createCacheTask(taskNo int, start, end int64, taskParam *downloader.TaskPar
 	cache.FileName = taskParam.FileName
 	cache.OrgRepo = taskParam.OrgRepo
 	cache.ResponseChan = taskParam.ResponseChan
-	cache.Preheat = taskParam.Preheat
 	return cache
 }
 
@@ -351,6 +328,5 @@ func createRemoteTask(taskNo int, start, end int64, taskParam *downloader.TaskPa
 	remote.DataType = taskParam.DataType
 	remote.Etag = taskParam.Etag
 	remote.Cancel = taskParam.Cancel
-	remote.Preheat = taskParam.Preheat
 	return remote
 }

@@ -1,0 +1,310 @@
+//  Copyright (c) 2025 dingodb.com, Inc. All Rights Reserved
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http:www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
+package service
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"dingospeed/internal/dao"
+	"dingospeed/internal/data"
+	"dingospeed/pkg/config"
+	"dingospeed/pkg/consts"
+	"dingospeed/pkg/proto/manager"
+	"dingospeed/pkg/util"
+
+	"github.com/bytedance/sonic"
+	"github.com/robfig/cron/v3"
+	"go.uber.org/zap"
+)
+
+type LocalOperationService struct {
+	Ctx          context.Context
+	schedulerDao *dao.SchedulerDao
+}
+
+func NewLocalOperationService(schedulerDao *dao.SchedulerDao) *LocalOperationService {
+	return &LocalOperationService{schedulerDao: schedulerDao}
+}
+
+func (l *LocalOperationService) Initialize() {
+	if config.SysConfig.GetOriginSchedulerModel() == consts.SchedulerModeCluster {
+		// 将失败的信息存储到本地
+		go l.storeLocalOperation()
+		if config.SysConfig.Online() {
+			// 将本地记录同步到schedule
+			go l.startFileProcessSync()
+		}
+	}
+}
+
+func (l *LocalOperationService) storeLocalOperation() {
+	for {
+		select {
+		case localOperation, ok := <-data.GetLocalOperationChan():
+			if !ok {
+				return
+			}
+			marshal, err := sonic.Marshal(localOperation)
+			if err != nil {
+				zap.S().Errorf("marshal err.%v", err)
+				continue
+			}
+			err = writeToDailyFile(string(marshal))
+			if err != nil {
+				zap.S().Errorf("writeToDailyFile err.%v", err)
+				continue
+			}
+		case <-l.Ctx.Done():
+			zap.S().Warnf("storeLocalOperation stop.")
+			return
+		}
+	}
+}
+
+func (l *LocalOperationService) startFileProcessSync() {
+	time.Sleep(10 * time.Second) // 程序启动后10s会先做一次同步
+	err := l.FileProcessSync()
+	if err != nil {
+		zap.S().Errorf("FileProcessSync err.%v", err)
+	}
+
+	c := cron.New(cron.WithSeconds())
+	_, err = c.AddFunc("0 0 * * * ?", func() {
+		if err = l.FileProcessSync(); err != nil {
+			zap.S().Errorf("FileProcessSync err.%v", err)
+		}
+	})
+	if err != nil {
+		zap.S().Errorf("添加PersistRepo任务失败: %v", err)
+		return
+	}
+	c.Start()
+	defer c.Stop()
+	select {
+	case <-l.Ctx.Done():
+		return
+	}
+}
+
+func (l *LocalOperationService) FileProcessSync() error {
+	if config.SysConfig.GetSchedulerModel() == consts.SchedulerModeStandalone {
+		return nil
+	}
+	processDir := filepath.Join(config.SysConfig.Server.Repos, "daily_process")
+	processFilePaths, err := listFilesBeforeLastHour(processDir)
+	if err != nil {
+		return err
+	}
+	for _, filePath := range processFilePaths {
+		err = l.readAndSyncFileProcess(filePath)
+		if err != nil {
+			zap.S().Errorf("readAndSyncFileProcess err.file:%s, %v", filePath, err)
+			continue
+		}
+		err = util.DeleteFile(filePath)
+		if err != nil {
+			zap.S().Errorf("DeleteFile err.file:%s, %v", filePath, err)
+			continue
+		}
+	}
+	return nil
+}
+
+func (l *LocalOperationService) readAndSyncFileProcess(filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("打开文件失败: %w", err)
+	}
+	defer file.Close()
+	var processParams []*data.FileProcessParam
+	scanner := bufio.NewScanner(file)
+	count, batchSize := 0, 10
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		jsonStr, err := extractJSON(line)
+		if err != nil {
+			zap.S().Errorf("跳过无效行: %v", err)
+			return err
+		}
+		var localOperation data.LocalOperation
+		if err = sonic.Unmarshal([]byte(jsonStr), &localOperation); err != nil {
+			zap.S().Errorf("解析 JSON 失败: %v, 内容: %s", err, jsonStr)
+			return err
+		}
+		if localOperation.Type == consts.OperationPreheat {
+			var cacheJobReq manager.UpdateCacheJobStatusReq
+			if err = sonic.Unmarshal([]byte(localOperation.Body), &cacheJobReq); err != nil {
+				zap.S().Errorf("解析 JSON 失败: %v, 内容: %s", err, jsonStr)
+				return err
+			}
+			if err = l.schedulerDao.UpdateCacheJobStatus(&cacheJobReq); err != nil {
+				return err
+			}
+		} else if localOperation.Type == consts.OperationMount {
+			var mountStatusReq manager.UpdateRepositoryMountStatusReq
+			if err = sonic.Unmarshal([]byte(localOperation.Body), &mountStatusReq); err != nil {
+				zap.S().Errorf("解析 JSON 失败: %v, 内容: %s", err, jsonStr)
+				return err
+			}
+			if err = l.schedulerDao.UpdateRepositoryMountStatus(&mountStatusReq); err != nil {
+				return err
+			}
+		} else {
+			var process data.FileProcessParam
+			if err = sonic.Unmarshal([]byte(localOperation.Body), &process); err != nil {
+				zap.S().Errorf("解析 JSON 失败: %v, 内容: %s", err, jsonStr)
+				return err
+			}
+			processParams = append(processParams, &process)
+			count++
+			if count == batchSize {
+				err = l.SyncFileProcess(processParams)
+				if err != nil {
+					return err
+				}
+				count = 0
+			}
+		}
+	}
+	if count > 0 {
+		err = l.SyncFileProcess(processParams)
+		if err != nil {
+			return err
+		}
+	}
+	if err = scanner.Err(); err != nil {
+		return fmt.Errorf("读取文件错误: %w", err)
+	}
+	return nil
+}
+
+func (l *LocalOperationService) SyncFileProcess(processParams []*data.FileProcessParam) error {
+	fileProcessEntries := make([]*manager.FileProcessEntry, 0)
+	for _, param := range processParams {
+		fileProcessEntries = append(fileProcessEntries, &manager.FileProcessEntry{
+			DataType:   param.Datatype,
+			Org:        param.Org,
+			Repo:       param.Repo,
+			Name:       param.Name,
+			Etag:       param.Etag,
+			InstanceId: config.SysConfig.Scheduler.Discovery.InstanceId,
+			StartPos:   param.StartPos,
+			EndPos:     param.EndPos,
+			FileSize:   param.FileSize,
+			Status:     param.Status,
+			ProcessId:  param.ProcessId,
+		})
+	}
+	err := l.schedulerDao.SyncFileProcess(&manager.SyncFileProcessReq{
+		FileProcessEntries: fileProcessEntries,
+	})
+	if err != nil {
+		zap.S().Errorf("SyncFileProcess err.%v", err)
+		return err
+	}
+	return nil
+}
+
+func extractJSON(logLine string) (string, error) {
+	sepIndex := strings.Index(logLine, "] ")
+	if sepIndex == -1 {
+		return "", fmt.Errorf("日志格式错误，未找到时间戳分隔符: %s", logLine)
+	}
+	jsonStr := logLine[sepIndex+2:]
+	return jsonStr, nil
+}
+
+func extractTimePrefix(filename string) (string, error) {
+	if len(filename) < 10 {
+		return "", fmt.Errorf("文件名过短，无法提取时间: %s", filename)
+	}
+	timePrefix := filename[:10]
+	for _, c := range timePrefix {
+		if c < '0' || c > '9' {
+			return "", fmt.Errorf("时间前缀包含非数字字符: %s", timePrefix)
+		}
+	}
+	return timePrefix, nil
+}
+
+func parseFileTime(filename string) (time.Time, error) {
+	timePrefix, err := extractTimePrefix(filename)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.ParseInLocation("2006010215", timePrefix, time.Local)
+}
+
+// 获取至少前1小时的文件（适配 2006010201-xxx/xxx.log 格式）
+func listFilesBeforeLastHour(dirPath string) ([]string, error) {
+	threshold := time.Now().Add(-1 * time.Hour)
+	var result []string
+	if !util.FileExists(dirPath) {
+		return result, nil
+	}
+	err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("访问路径失败: %w", err)
+		}
+		if d.IsDir() { // 跳过目录，只处理文件
+			return nil
+		}
+		filename := d.Name()
+		fileTime, err := parseFileTime(filename)
+		if err != nil {
+			// 忽略格式不符合的文件（非目标命名规则）
+			return nil
+		}
+		if fileTime.Before(threshold) {
+			result = append(result, path) // 记录完整路径
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func writeToDailyFile(data string) error {
+	now := time.Now()
+	dateStr := now.Format("2006010201")
+	filename := fmt.Sprintf("%s.log", dateStr)
+	processDir := filepath.Join(config.SysConfig.Server.Repos, "daily_process")
+	if err := os.MkdirAll(processDir, 0755); err != nil {
+		return fmt.Errorf("创建目录失败: %v", err)
+	}
+	filePath := filepath.Join(processDir, filename)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("打开文件失败: %v", err)
+	}
+	defer file.Close()
+	timestamp := now.Format("15:04:05")
+	content := fmt.Sprintf("[%s] %s\n", timestamp, data)
+	if _, err := file.WriteString(content); err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+	return nil
+}
